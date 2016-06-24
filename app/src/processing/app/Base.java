@@ -36,6 +36,7 @@ import cc.arduino.packages.DiscoveryManager;
 import cc.arduino.view.Event;
 import cc.arduino.view.JMenuUtils;
 import cc.arduino.view.SplashScreenHelper;
+
 import org.apache.commons.compress.utils.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import processing.app.debug.TargetBoard;
@@ -66,6 +67,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static processing.app.I18n.tr;
 
@@ -78,14 +80,10 @@ import static processing.app.I18n.tr;
  */
 public class Base {
 
-  public static final Predicate<UserLibrary> CONTRIBUTED = new Predicate<UserLibrary>() {
-    @Override
-    public boolean test(UserLibrary library) {
-      return library.getTypes() == null || library.getTypes().isEmpty() || library.getTypes().contains("Contributed");
-    }
-  };
+  public static final Predicate<UserLibrary> CONTRIBUTED = library -> library.getTypes() == null || library.getTypes().isEmpty() || library.getTypes().contains("Contributed");
+  public static final Predicate<UserLibrary> RETIRED = library -> library.getTypes() != null && library.getTypes().contains("Retired");
 
-  private static final int RECENT_SKETCHES_MAX_SIZE = 5;
+  private static final int RECENT_SKETCHES_MAX_SIZE = 10;
 
   private static boolean commandLine;
   public static volatile Base INSTANCE;
@@ -121,7 +119,7 @@ public class Base {
   private List<JMenu> boardsCustomMenus;
   private List<JMenuItem> programmerMenus;
 
-  private final PdeKeywords pdeKeywords;
+  private PdeKeywords pdeKeywords;
   private final List<JMenuItem> recentSketchesMenuItems;
 
   static public void main(String args[]) throws Exception {
@@ -144,7 +142,9 @@ public class Base {
   }
 
   static public void guardedMain(String args[]) throws Exception {
-    Runtime.getRuntime().addShutdownHook(new Thread(DeleteFilesOnShutdown.INSTANCE));
+    Thread deleteFilesOnShutdownThread = new Thread(DeleteFilesOnShutdown.INSTANCE);
+    deleteFilesOnShutdownThread.setName("DeleteFilesOnShutdown");
+    Runtime.getRuntime().addShutdownHook(deleteFilesOnShutdownThread);
 
     BaseNoGui.initLogger();
 
@@ -157,8 +157,6 @@ public class Base {
     BaseNoGui.initPortableFolder();
 
     BaseNoGui.initParameters(args);
-
-    System.setProperty("swing.aatext", PreferencesData.get("editor.antialias", "true"));
 
     BaseNoGui.initVersion();
 
@@ -208,6 +206,7 @@ public class Base {
 
     // setup the theme coloring fun
     Theme.init();
+    System.setProperty("swing.aatext", PreferencesData.get("editor.antialias", "true"));
 
     // Set the look and feel before opening the window
     try {
@@ -217,7 +216,7 @@ public class Base {
     }
 
     // Create a location for untitled sketches
-    untitledFolder = BaseNoGui.createTempFolder("untitled");
+    untitledFolder = FileUtils.createTempFolder("untitled" + new Random().nextInt(Integer.MAX_VALUE), ".tmp");
     DeleteFilesOnShutdown.add(untitledFolder);
 
     INSTANCE = new Base(args);
@@ -304,8 +303,8 @@ public class Base {
     this.pdeKeywords = new PdeKeywords();
     this.pdeKeywords.reload();
 
-    contributionInstaller = new ContributionInstaller(BaseNoGui.indexer, BaseNoGui.getPlatform(), new GPGDetachedSignatureVerifier());
-    libraryInstaller = new LibraryInstaller(BaseNoGui.librariesIndexer, BaseNoGui.getPlatform());
+    contributionInstaller = new ContributionInstaller(BaseNoGui.getPlatform(), new GPGDetachedSignatureVerifier());
+    libraryInstaller = new LibraryInstaller(BaseNoGui.getPlatform());
 
     parser.parseArgumentsPhase2();
 
@@ -328,7 +327,7 @@ public class Base {
       boolean showEditor = parser.isGuiMode();
       if (!parser.isForceSavePrefs())
         PreferencesData.setDoSave(showEditor);
-      if (handleOpen(file, nextEditorLocation(), showEditor, false) == null) {
+      if (handleOpen(file, retrieveSketchLocation(".default"), showEditor, false) == null) {
         String mess = I18n.format(tr("Failed to open sketch: \"{0}\""), path);
         // Open failure is fatal in upload/verify mode
         if (parser.isVerifyOrUploadMode())
@@ -382,7 +381,7 @@ public class Base {
       System.exit(0);
 
     } else if (parser.isInstallLibrary()) {
-      LibrariesIndexer indexer = new LibrariesIndexer(BaseNoGui.getSettingsFolder(), new ContributionsIndexer(BaseNoGui.getSettingsFolder(), BaseNoGui.getPlatform(), new GPGDetachedSignatureVerifier()));
+      LibrariesIndexer indexer = new LibrariesIndexer(BaseNoGui.getSettingsFolder());
       ProgressListener progressListener = new ConsoleProgressListener();
       indexer.parseIndex();
       BaseNoGui.onBoardOrPortChange();
@@ -459,15 +458,15 @@ public class Base {
         handleNew();
       }
 
+      new Thread(new BuiltInCoreIsNewerCheck(this)).start();
+
       // Check for updates
       if (PreferencesData.getBoolean("update.check")) {
         new UpdateCheck(this);
+
+        contributionsSelfCheck = new ContributionsSelfCheck(this, new UpdatableBoardsLibsFakeURLsHandler(this), contributionInstaller, libraryInstaller);
+        new Timer(false).schedule(contributionsSelfCheck, Constants.BOARDS_LIBS_UPDATABLE_CHECK_START_PERIOD);
       }
-
-      new Thread(new BuiltInCoreIsNewerCheck(this)).start();
-
-      contributionsSelfCheck = new ContributionsSelfCheck(this, new UpdatableBoardsLibsFakeURLsHandler(this), BaseNoGui.indexer, contributionInstaller, BaseNoGui.librariesIndexer, libraryInstaller);
-      new Timer(false).schedule(contributionsSelfCheck, Constants.BOARDS_LIBS_UPDATABLE_CHECK_START_PERIOD);
 
     } else if (parser.isNoOpMode()) {
       // Do nothing (intended for only changing preferences)
@@ -490,32 +489,6 @@ public class Base {
    * @throws Exception
    */
   protected boolean restoreSketches() throws Exception {
-    // figure out window placement
-
-    Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
-    boolean windowPositionValid = true;
-
-    if (PreferencesData.get("last.screen.height") != null) {
-      // if screen size has changed, the window coordinates no longer
-      // make sense, so don't use them unless they're identical
-      int screenW = PreferencesData.getInteger("last.screen.width");
-      int screenH = PreferencesData.getInteger("last.screen.height");
-
-      if ((screen.width != screenW) || (screen.height != screenH)) {
-        windowPositionValid = false;
-      }
-      /*
-      int windowX = Preferences.getInteger("last.window.x");
-      int windowY = Preferences.getInteger("last.window.y");
-      if ((windowX < 0) || (windowY < 0) ||
-          (windowX > screenW) || (windowY > screenH)) {
-        windowPositionValid = false;
-      }
-      */
-    } else {
-      windowPositionValid = false;
-    }
-
     // Iterate through all sketches that were open last time p5 was running.
     // If !windowPositionValid, then ignore the coordinates found for each.
 
@@ -527,7 +500,7 @@ public class Base {
       if (path == null) {
         continue;
       }
-      if (BaseNoGui.getPortableFolder() != null) {
+      if (BaseNoGui.getPortableFolder() != null && !new File(path).isAbsolute()) {
         File absolute = new File(BaseNoGui.getPortableFolder(), path);
         try {
           path = absolute.getCanonicalPath();
@@ -535,13 +508,7 @@ public class Base {
           // path unchanged.
         }
       }
-      int[] location;
-      if (windowPositionValid) {
-        String locationStr = PreferencesData.get("last.sketch" + i + ".location");
-        location = PApplet.parseInt(PApplet.split(locationStr, ','));
-      } else {
-        location = nextEditorLocation();
-      }
+      int[] location = retrieveSketchLocation("" + i);
       // If file did not exist, null will be returned for the Editor
       if (handleOpen(new File(path), location, nextEditorLocation(), true, false, false) != null) {
         opened++;
@@ -561,33 +528,54 @@ public class Base {
     PreferencesData.setInteger("last.screen.width", screen.width);
     PreferencesData.setInteger("last.screen.height", screen.height);
 
-    String untitledPath = untitledFolder.getAbsolutePath();
+    // If there is only one sketch opened save his position as default
+    if (editors.size() == 1) {
+      storeSketchLocation(editors.get(0), ".default");
+    }
 
     // Save the sketch path and window placement for each open sketch
-    LinkedList<Editor> reverseEditors = new LinkedList<Editor>(editors);
-    Collections.reverse(reverseEditors);
+    String untitledPath = untitledFolder.getAbsolutePath();
+    List<Editor> reversedEditors = new LinkedList<>(editors);
+    Collections.reverse(reversedEditors);
     int index = 0;
-    for (Editor editor : reverseEditors) {
-      String path = editor.getSketch().getMainFilePath();
-      // In case of a crash, save untitled sketches if they contain changes.
-      // (Added this for release 0158, may not be a good idea.)
-      if (path.startsWith(untitledPath) && !editor.getSketch().isModified()) {
+    for (Editor editor : reversedEditors) {
+      Sketch sketch = editor.getSketch();
+      String path = sketch.getMainFilePath();
+      // Skip untitled sketches if they do not contains changes.
+      if (path.startsWith(untitledPath) && !sketch.isModified()) {
         continue;
       }
-      if (BaseNoGui.getPortableFolder() != null) {
-        path = FileUtils.relativePath(BaseNoGui.getPortableFolder().toString(), path);
-        if (path == null) {
-          continue;
-        }
-      }
-      PreferencesData.set("last.sketch" + index + ".path", path);
-
-      int[] location = editor.getPlacement();
-      String locationStr = PApplet.join(PApplet.str(location), ",");
-      PreferencesData.set("last.sketch" + index + ".location", locationStr);
+      storeSketchLocation(editor, "" + index);
       index++;
     }
     PreferencesData.setInteger("last.sketch.count", index);
+  }
+
+  private void storeSketchLocation(Editor editor, String index) {
+    String path = editor.getSketch().getMainFilePath();
+    String loc = StringUtils.join(editor.getPlacement(), ',');
+    PreferencesData.set("last.sketch" + index + ".path", path);
+    PreferencesData.set("last.sketch" + index + ".location", loc);
+  }
+
+  private int[] retrieveSketchLocation(String index) {
+    if (PreferencesData.get("last.screen.height") == null)
+      return defaultEditorLocation();
+
+    // if screen size has changed, the window coordinates no longer
+    // make sense, so don't use them unless they're identical
+    Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+    int screenW = PreferencesData.getInteger("last.screen.width");
+    int screenH = PreferencesData.getInteger("last.screen.height");
+
+    if ((screen.width != screenW) || (screen.height != screenH))
+      return defaultEditorLocation();
+
+    String locationStr = PreferencesData
+        .get("last.sketch" + index + ".location");
+    if (locationStr == null)
+      return defaultEditorLocation();
+    return PApplet.parseInt(PApplet.split(locationStr, ','));
   }
 
   protected void storeRecentSketches(Sketch sketch) {
@@ -617,7 +605,11 @@ public class Base {
     activeEditor.rebuildRecentSketchesMenu();
     if (PreferencesData.getBoolean("editor.external")) {
       try {
+        int previousCaretPosition = activeEditor.getTextArea().getCaretPosition();
         activeEditor.getSketch().load(true);
+        if (previousCaretPosition < activeEditor.getText().length()) {
+          activeEditor.getTextArea().setCaretPosition(previousCaretPosition);
+        }
       } catch (IOException e) {
         // noop
       }
@@ -627,49 +619,46 @@ public class Base {
     EditorConsole.setCurrentEditorConsole(activeEditor.console);
   }
 
-
-  protected int[] nextEditorLocation() {
+  protected int[] defaultEditorLocation() {
     int defaultWidth = PreferencesData.getInteger("editor.window.width.default");
     int defaultHeight = PreferencesData.getInteger("editor.window.height.default");
+    Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice().getDefaultConfiguration().getBounds();
+    return new int[]{
+            (screen.width - defaultWidth) / 2,
+            (screen.height - defaultHeight) / 2,
+            defaultWidth, defaultHeight, 0
+    };
+  }
 
+  protected int[] nextEditorLocation() {
     if (activeEditor == null) {
-      Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice().getDefaultConfiguration().getBounds();
       // If no current active editor, use default placement
-      return new int[]{
-              (screen.width - defaultWidth) / 2,
-              (screen.height - defaultHeight) / 2,
-              defaultWidth, defaultHeight, 0
-      };
+      return defaultEditorLocation();
+    }
 
-    } else {
-      Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+    Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
 
-      // With a currently active editor, open the new window
-      // using the same dimensions, but offset slightly.
-      synchronized (editors) {
-        final int OVER = 50;
-        // In release 0160, don't
-        //location = activeEditor.getPlacement();
-        Editor lastOpened = activeEditor;
-        int[] location = lastOpened.getPlacement();
-        // Just in case the bounds for that window are bad
-        location[0] += OVER;
-        location[1] += OVER;
+    // With a currently active editor, open the new window
+    // using the same dimensions, but offset slightly.
+    synchronized (editors) {
+      int[] location = activeEditor.getPlacement();
 
-        if (location[0] == OVER ||
-                location[2] == OVER ||
-                location[0] + location[2] > screen.width ||
-                location[1] + location[3] > screen.height) {
-          // Warp the next window to a randomish location on screen.
-          return new int[]{
-                  (int) (Math.random() * (screen.width - defaultWidth)),
-                  (int) (Math.random() * (screen.height - defaultHeight)),
-                  defaultWidth, defaultHeight, 0
-          };
-        }
+      // Just in case the bounds for that window are bad
+      final int OVER = 50;
+      location[0] += OVER;
+      location[1] += OVER;
 
-        return location;
+      if (location[0] == OVER || location[2] == OVER
+          || location[0] + location[2] > screen.width
+          || location[1] + location[3] > screen.height) {
+        // Warp the next window to a randomish location on screen.
+        int[] l = defaultEditorLocation();
+        l[0] *= Math.random() * 2;
+        l[1] *= Math.random() * 2;
+        return l;
       }
+
+      return location;
     }
   }
 
@@ -752,7 +741,7 @@ public class Base {
     try {
       File file = createNewUntitled();
       if (file != null) {
-        Editor editor = handleOpen(file, true);
+        handleOpen(file, true);
       }
 
     } catch (IOException e) {
@@ -899,12 +888,7 @@ public class Base {
     // now that we're ready, show the window
     // (don't do earlier, cuz we might move it based on a window being closed)
     if (showEditor) {
-      SwingUtilities.invokeLater(new Runnable() {
-        @Override
-        public void run() {
-          editor.setVisible(true);
-        }
-      });
+      SwingUtilities.invokeLater(() -> editor.setVisible(true));
     }
 
     return editor;
@@ -964,6 +948,8 @@ public class Base {
     editor.internalCloseRunner();
 
     if (editors.size() == 1) {
+      storeSketches();
+
       // This will store the sketch count as zero
       editors.remove(editor);
       try {
@@ -971,7 +957,6 @@ public class Base {
       } catch (Exception e) {
         //ignore
       }
-      storeSketches();
       rebuildRecentSketchesMenuItems();
 
       // Save out the current prefs state
@@ -1116,7 +1101,18 @@ public class Base {
 
   public LibraryList getIDELibs() {
     LibraryList installedLibraries = new LibraryList(BaseNoGui.librariesIndexer.getInstalledLibraries());
-    List<UserLibrary> libs = installedLibraries.stream().filter(CONTRIBUTED.negate()).collect(Collectors.toList());
+    List<UserLibrary> libs = installedLibraries.stream()
+      .filter(CONTRIBUTED.negate())
+      .filter(RETIRED.negate())
+      .collect(Collectors.toList());
+    return new LibraryList(libs);
+  }
+
+  public LibraryList getIDERetiredLibs() {
+    LibraryList installedLibraries = new LibraryList(BaseNoGui.librariesIndexer.getInstalledLibraries());
+    List<UserLibrary> libs = installedLibraries.stream()
+      .filter(RETIRED)
+      .collect(Collectors.toList());
     return new LibraryList(libs);
   }
 
@@ -1200,26 +1196,67 @@ public class Base {
     menu.removeAll();
 
     // Add examples from distribution "example" folder
+    JMenuItem label = new JMenuItem(tr("Built-in Examples"));
+    label.setEnabled(false);
+    menu.add(label);
     boolean found = addSketches(menu, BaseNoGui.getExamplesFolder());
-    if (found) menu.addSeparator();
+    if (found) {
+      menu.addSeparator();
+    }
 
     // Add examples from libraries
     LibraryList ideLibs = getIDELibs();
     ideLibs.sort();
-    for (UserLibrary lib : ideLibs)
+    if (!ideLibs.isEmpty()) {
+      label = new JMenuItem(tr("Examples from Libraries"));
+      label.setEnabled(false);
+      menu.add(label);
+    }
+    for (UserLibrary lib : ideLibs) {
       addSketchesSubmenu(menu, lib);
+    }
+
+    LibraryList retiredIdeLibs = getIDERetiredLibs();
+    retiredIdeLibs.sort();
+    if (!retiredIdeLibs.isEmpty()) {
+      JMenu retired = new JMenu(tr("RETIRED"));
+      menu.add(retired);
+      for (UserLibrary lib : retiredIdeLibs) {
+        addSketchesSubmenu(retired, lib);
+      }
+    }
 
     LibraryList userLibs = getUserLibs();
     if (userLibs.size() > 0) {
       menu.addSeparator();
       userLibs.sort();
-      for (UserLibrary lib : userLibs)
+      label = new JMenuItem(tr("Examples from Custom Libraries"));
+      label.setEnabled(false);
+      menu.add(label);
+      for (UserLibrary lib : userLibs) {
         addSketchesSubmenu(menu, lib);
+      }
     }
   }
 
+  private static String priorPlatformFolder;
+
   public void onBoardOrPortChange() {
     BaseNoGui.onBoardOrPortChange();
+
+    // reload keywords when package/platform changes
+    TargetPlatform tp = BaseNoGui.getTargetPlatform();
+    if (tp != null) {
+      String platformFolder = tp.getFolder().getAbsolutePath();
+      if (priorPlatformFolder == null || !priorPlatformFolder.equals(platformFolder)) {
+        pdeKeywords = new PdeKeywords();
+        pdeKeywords.reload();
+        priorPlatformFolder = platformFolder;
+        for (Editor editor : editors) {
+          editor.updateKeywords(pdeKeywords);
+        }
+      }
+    }
 
     // Update editors status bar
     for (Editor editor : editors) {
@@ -1232,7 +1269,7 @@ public class Base {
       contributionsSelfCheck.cancel();
     }
     @SuppressWarnings("serial")
-    LibraryManagerUI managerUI = new LibraryManagerUI(activeEditor, BaseNoGui.librariesIndexer, libraryInstaller) {
+    LibraryManagerUI managerUI = new LibraryManagerUI(activeEditor, libraryInstaller) {
       @Override
       protected void onIndexesUpdated() throws Exception {
         BaseNoGui.initPackages();
@@ -1261,7 +1298,7 @@ public class Base {
       contributionsSelfCheck.cancel();
     }
     @SuppressWarnings("serial")
-    ContributionManagerUI managerUI = new ContributionManagerUI(activeEditor, BaseNoGui.indexer, contributionInstaller) {
+    ContributionManagerUI managerUI = new ContributionManagerUI(activeEditor, contributionInstaller) {
       @Override
       protected void onIndexesUpdated() throws Exception {
         BaseNoGui.initPackages();
@@ -1705,18 +1742,17 @@ public class Base {
    */
   @SuppressWarnings("serial")
   public void handleAbout() {
-    final Image image = getLibImage("about.png", activeEditor);
+    final Image image = Theme.getLibImage("about", activeEditor,
+                                          Theme.scale(475), Theme.scale(300));
     final Window window = new Window(activeEditor) {
-      public void paint(Graphics g) {
+      public void paint(Graphics graphics) {
+        Graphics2D g = Theme.setupGraphics2D(graphics);
         g.drawImage(image, 0, 0, null);
 
-        Graphics2D g2 = (Graphics2D) g;
-        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
-                RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
-
-        g.setFont(new Font("SansSerif", Font.PLAIN, 11));
+        Font f = new Font("SansSerif", Font.PLAIN, Theme.scale(11));
+        g.setFont(f);
         g.setColor(Color.white);
-        g.drawString(BaseNoGui.VERSION_NAME_LONG, 33, 20);
+        g.drawString(BaseNoGui.VERSION_NAME_LONG, Theme.scale(33), Theme.scale(20));
       }
     };
     window.addMouseListener(new MouseAdapter() {
@@ -1867,22 +1903,20 @@ public class Base {
 
 
   /**
-   * Give this Frame a Processing icon.
+   * Give this Frame an icon.
    */
   static public void setIcon(Frame frame) {
-    // don't use the low-res icon on Mac OS X; the window should
-    // already have the right icon from the .app file.
-    if (OSUtils.isMacOS()) return;
-    
-    // don't use the low-res icon on Linux
-    if (OSUtils.isLinux()){
-      Image image = Toolkit.getDefaultToolkit().createImage(BaseNoGui.getContentFile("/lib/arduino.png").getAbsolutePath());
-      frame.setIconImage(image);
+    if (OSUtils.isMacOS()) {
       return;
     }
 
-    Image image = Toolkit.getDefaultToolkit().createImage(PApplet.ICON_IMAGE);
-    frame.setIconImage(image);
+    List<Image> icons = Stream
+      .of("16", "24", "32", "48", "64", "72", "96", "128", "256")
+      .map(res -> "/lib/icons/" + res + "x" + res + "/apps/arduino.png")
+      .map(path -> BaseNoGui.getContentFile(path).getAbsolutePath())
+      .map(absPath -> Toolkit.getDefaultToolkit().createImage(absPath))
+      .collect(Collectors.toList());
+    frame.setIconImages(icons);
   }
 
 
@@ -1997,32 +2031,6 @@ public class Base {
 
   static public File getContentFile(String name) {
     return BaseNoGui.getContentFile(name);
-  }
-
-
-  /**
-   * Get an image associated with the current color theme.
-   */
-  static public Image getThemeImage(String name, Component who) {
-    return getLibImage("theme/" + name, who);
-  }
-
-
-  /**
-   * Return an Image object from inside the Processing lib folder.
-   */
-  static public Image getLibImage(String name, Component who) {
-    Toolkit tk = Toolkit.getDefaultToolkit();
-
-    File imageLocation = new File(getContentFile("lib"), name);
-    Image image = tk.getImage(imageLocation.getAbsolutePath());
-    MediaTracker tracker = new MediaTracker(who);
-    tracker.addImage(image, 0);
-    try {
-      tracker.waitForAll();
-    } catch (InterruptedException e) {
-    }
-    return image;
   }
 
 

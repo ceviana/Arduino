@@ -19,6 +19,26 @@ import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 
 public class I18n {
+
+  static {
+    tr("Arduino");
+    tr("Partner");
+    tr("Recommended");
+    tr("Contributed");
+    tr("Retired");
+
+    tr("Display");
+    tr("Communication");
+    tr("Signal Input/Output");
+    tr("Sensors");
+    tr("Device Control");
+    tr("Timing");
+    tr("Data Storage");
+    tr("Data Processing");
+    tr("Other");
+    tr("Uncategorized");
+  }
+
   // start using current locale but still allow using the dropdown list later
   private static ResourceBundle i18n;
 
@@ -48,11 +68,6 @@ public class I18n {
     PROMPT_CANCEL = tr("Cancel");
     PROMPT_OK = tr("OK");
     PROMPT_BROWSE = tr("Browse");
-  }
-
-  @Deprecated
-  public static String _(String s) {
-    return tr(s);
   }
 
   public static String tr(String s) {
@@ -87,7 +102,7 @@ public class I18n {
 
   /**
    * Does nothing.
-   * <p/>
+   * <p>
    * This method is an hack to extract words with gettext tool.
    */
   protected static void unusedStrings() {

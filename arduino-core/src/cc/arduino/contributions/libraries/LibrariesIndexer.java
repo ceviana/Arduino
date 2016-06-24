@@ -33,7 +33,6 @@ import cc.arduino.Constants;
 import cc.arduino.contributions.libraries.filters.LibraryInstalledInsideCore;
 import cc.arduino.contributions.libraries.filters.TypePredicate;
 import cc.arduino.contributions.packages.ContributedPlatform;
-import cc.arduino.contributions.packages.ContributionsIndexer;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.module.mrbean.MrBeanModule;
@@ -58,7 +57,6 @@ import static processing.app.I18n.tr;
 
 public class LibrariesIndexer {
 
-  private final ContributionsIndexer contributionsIndexer;
   private LibrariesIndex index;
   private final LibraryList installedLibraries = new LibraryList();
   private final LibraryList installedLibrariesWithDuplicates = new LibraryList();
@@ -69,8 +67,7 @@ public class LibrariesIndexer {
 
   private final List<String> badLibNotified = new ArrayList<>();
 
-  public LibrariesIndexer(File preferencesFolder, ContributionsIndexer contributionsIndexer) {
-    this.contributionsIndexer = contributionsIndexer;
+  public LibrariesIndexer(File preferencesFolder) {
     this.indexFile = new File(preferencesFolder, "library_index.json");
     this.stagingFolder = new File(new File(preferencesFolder, "staging"), "libraries");
   }
@@ -109,6 +106,11 @@ public class LibrariesIndexer {
     // Clear all installed flags
     installedLibraries.clear();
     installedLibrariesWithDuplicates.clear();
+
+    if (index.getLibraries() == null) {
+      return;
+    }
+
     for (ContributedLibrary lib : index.getLibraries()) {
       lib.setInstalled(false);
     }
@@ -118,8 +120,8 @@ public class LibrariesIndexer {
       scanInstalledLibraries(folder, folder.equals(sketchbookLibrariesFolder));
     }
 
-    installedLibraries.stream().filter(new TypePredicate("Contributed")).filter(new LibraryInstalledInsideCore(contributionsIndexer)).forEach(userLibrary -> {
-      ContributedPlatform platform = contributionsIndexer.getPlatformByFolder(userLibrary.getInstalledFolder());
+    installedLibraries.stream().filter(new TypePredicate("Contributed")).filter(new LibraryInstalledInsideCore()).forEach(userLibrary -> {
+      ContributedPlatform platform = BaseNoGui.indexer.getPlatformByFolder(userLibrary.getInstalledFolder());
       userLibrary.setTypes(Collections.singletonList(platform.getCategory()));
     });
   }
@@ -216,7 +218,7 @@ public class LibrariesIndexer {
   }
 
   public LibraryList getInstalledLibraries() {
-    return installedLibraries;
+    return new LibraryList(installedLibraries);
   }
 
   // Same as getInstalledLibraries(), but allow duplicates between
@@ -236,8 +238,6 @@ public class LibrariesIndexer {
    * Set the sketchbook library folder. <br />
    * New libraries will be installed here. <br />
    * Libraries not found on this folder will be marked as read-only.
-   *
-   * @param folder
    */
   public void setSketchbookLibrariesFolder(File folder) {
     this.sketchbookLibrariesFolder = folder;

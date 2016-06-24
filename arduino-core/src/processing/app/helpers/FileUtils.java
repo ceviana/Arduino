@@ -3,6 +3,8 @@ package processing.app.helpers;
 import org.apache.commons.compress.utils.IOUtils;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.regex.Pattern;
 
@@ -56,12 +58,12 @@ public class FileUtils {
   public static void copy(File sourceFolder, File destFolder) throws IOException {
     for (File file : sourceFolder.listFiles()) {
       File destFile = new File(destFolder, file.getName());
-      if (file.isDirectory()) {
-        if (!destFile.mkdir()) {
+      if (file.isDirectory() && !SOURCE_CONTROL_FOLDERS.contains(file.getName())) {
+        if (!destFile.exists() && !destFile.mkdir()) {
           throw new IOException("Unable to create folder: " + destFile);
         }
         copy(file, destFile);
-      } else {
+      } else if (!file.isDirectory()) {
         copyFile(file, destFile);
       }
     }
@@ -84,15 +86,27 @@ public class FileUtils {
   }
 
   public static File createTempFolder() throws IOException {
-    return createTempFolderIn(new File(System.getProperty("java.io.tmpdir")));
+    return createTempFolder(new File(System.getProperty("java.io.tmpdir")));
   }
 
-  public static File createTempFolderIn(File parent) throws IOException {
-    File tmpFolder = new File(parent, "arduino_" + new Random().nextInt(1000000));
-    if (!tmpFolder.mkdir()) {
-      throw new IOException("Unable to create temp folder " + tmpFolder);
-    }
-    return tmpFolder;
+  public static File createTempFolder(File parent) throws IOException {
+    return createTempFolder(parent, "arduino_");
+  }
+
+  public static File createTempFolder(File parent, String prefix) throws IOException {
+    return createTempFolder(parent, prefix, Integer.toString(new Random().nextInt(1000000)));
+  }
+
+  public static File createTempFolder(String prefix) throws IOException {
+    return createTempFolder(new File(System.getProperty("java.io.tmpdir")), prefix);
+  }
+
+  public static File createTempFolder(String prefix, String suffix) throws IOException {
+    return createTempFolder(new File(System.getProperty("java.io.tmpdir")), prefix, suffix);
+  }
+
+  public static File createTempFolder(File parent, String prefix, String suffix) throws IOException {
+    return Files.createDirectories(Paths.get(parent.getAbsolutePath(), prefix + suffix)).toFile();
   }
 
   //
@@ -227,15 +241,44 @@ public class FileUtils {
   }
 
   public static boolean hasExtension(File file, List<String> extensions) {
-    String pieces[] = file.getName().split("\\.");
-    if (pieces.length < 2) {
-      return false;
+    String extension = splitFilename(file).extension;
+    return extensions.contains(extension.toLowerCase());
+  }
+
+  /**
+   * The result of a splitFilename call.
+   */
+  public static class SplitFile {
+    public SplitFile(String basename, String extension) {
+      this.basename = basename;
+      this.extension = extension;
     }
 
-    String extension = pieces[pieces.length - 1];
+    public String basename;
+    public String extension;
+  }
 
-    return extensions.contains(extension.toLowerCase());
+  /**
+   * Splits the given filename into a basename (everything up to the
+   * last dot) and an extension (everything from the last dot). The dot
+   * is not included in either part.
+   *
+   * If no dot is present, the entire filename is returned as the
+   * basename, leaving the extension empty (empty string, not null).
+   */
+  public static SplitFile splitFilename(String filename) {
+    int index = filename.lastIndexOf(".");
 
+    if (index >= 0)
+      return new SplitFile(filename.substring(0, index), filename.substring(index + 1));
+    return new SplitFile(filename, "");
+  }
+
+  /**
+   * Helper function returning splitFilename(file.getName()).
+   */
+  public static SplitFile splitFilename(File file) {
+    return splitFilename(file.getName());
   }
 
   /**

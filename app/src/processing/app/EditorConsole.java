@@ -28,6 +28,8 @@ import javax.swing.text.*;
 import java.awt.*;
 import java.io.PrintStream;
 
+import static processing.app.Theme.scale;
+
 /**
  * Message console that sits below the editing area.
  */
@@ -36,7 +38,7 @@ public class EditorConsole extends JScrollPane {
   private static ConsoleOutputStream out;
   private static ConsoleOutputStream err;
 
-  public static synchronized void init(SimpleAttributeSet outStyle, PrintStream outStream, SimpleAttributeSet errStyle, PrintStream errStream) {
+  private static synchronized void init(SimpleAttributeSet outStyle, PrintStream outStream, SimpleAttributeSet errStyle, PrintStream errStream) {
     if (out != null) {
       return;
     }
@@ -63,13 +65,14 @@ public class EditorConsole extends JScrollPane {
     consoleTextPane.setEditable(false);
     DefaultCaret caret = (DefaultCaret) consoleTextPane.getCaret();
     caret.setUpdatePolicy(DefaultCaret.NEVER_UPDATE);
+    consoleTextPane.setFocusTraversalKeysEnabled(false);
 
     Color backgroundColour = Theme.getColor("console.color");
     consoleTextPane.setBackground(backgroundColour);
 
     Font consoleFont = Theme.getFont("console.font");
     Font editorFont = PreferencesData.getFont("editor.font");
-    Font actualFont = new Font(consoleFont.getName(), consoleFont.getStyle(), editorFont.getSize());
+    Font actualFont = new Font(consoleFont.getName(), consoleFont.getStyle(), scale(editorFont.getSize()));
 
     SimpleAttributeSet stdOutStyle = new SimpleAttributeSet();
     StyleConstants.setForeground(stdOutStyle, Theme.getColor("console.output.color"));
@@ -101,8 +104,8 @@ public class EditorConsole extends JScrollPane {
     int height = metrics.getAscent() + metrics.getDescent();
     int lines = PreferencesData.getInteger("console.lines");
     int sizeFudge = 6; //10; // unclear why this is necessary, but it is
-    setPreferredSize(new Dimension(1024, (height * lines) + sizeFudge));
-    setMinimumSize(new Dimension(1024, (height * 5) + sizeFudge));
+    setPreferredSize(new Dimension(100, (height * lines) + sizeFudge));
+    setMinimumSize(new Dimension(100, (height * 5) + sizeFudge));
 
     EditorConsole.init(stdOutStyle, System.out, stdErrStyle, System.err);
   }
@@ -116,11 +119,23 @@ public class EditorConsole extends JScrollPane {
     }
   }
 
+  public void scrollDown() {
+    getHorizontalScrollBar().setValue(0);
+    getVerticalScrollBar().setValue(getVerticalScrollBar().getMaximum());
+  }
+
+  public boolean isEmpty() {
+    return document.getLength() == 0;
+  }
+
+  public void insertString(String line, SimpleAttributeSet attributes) throws BadLocationException {
+    line = line.replace("\r\n", "\n").replace("\r", "\n");
+    int offset = document.getLength();
+    document.insertString(offset, line, attributes);
+  }
+
   public String getText() {
     return consoleTextPane.getText().trim();
   }
 
-  public Document getDocument() {
-    return document;
-  }
 }

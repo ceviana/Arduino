@@ -75,7 +75,7 @@ extern USBDevice_ USBDevice;
 struct ring_buffer;
 
 #ifndef SERIAL_BUFFER_SIZE
-#if (RAMEND < 1000)
+#if ((RAMEND - RAMSTART) < 1023)
 #define SERIAL_BUFFER_SIZE 16
 #else
 #define SERIAL_BUFFER_SIZE 64
@@ -193,6 +193,7 @@ bool	CDC_Setup(USBSetup& setup);
 
 int USB_SendControl(uint8_t flags, const void* d, int len);
 int USB_RecvControl(void* d, int len);
+int USB_RecvControlLong(void* d, int len);
 
 uint8_t	USB_Available(uint8_t ep);
 uint8_t USB_SendSpace(uint8_t ep);

@@ -14,6 +14,7 @@ hardware/arduino/bootloaders/caterina_LUFA/Caterina.elf
 hardware/arduino/bootloaders/caterina_LUFA/Caterina.eep
 hardware/arduino/bootloaders/caterina_LUFA/.dep/
 build/*.zip
+build/*.tar.bz2
 build/windows/work/
 build/windows/*.zip
 build/windows/*.tgz
@@ -44,6 +45,7 @@ build/linux/*.tar.xz
 build/linux/*.tar.bz2
 build/linux/*.zip
 build/linux/libastylej*
+build/linux/liblistSerials*
 build/shared/reference*.zip
 build/shared/Edison*.zip
 build/shared/Galileo*.zip
